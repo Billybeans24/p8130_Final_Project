@@ -45,7 +45,7 @@ categorical_vars <- data %>% select_if(is.character)
 category_summary <- categorical_vars %>%
   gather(Variable, Category) %>%
   group_by(Variable, Category) %>%
-  summarise(Count = n(), .groups = "drop") %>%
+  summarise(Count = n()) %>%
   mutate(Percentage = round((Count / sum(Count)) * 100, 1)) %>%
   arrange(Variable, desc(Count))
 
@@ -72,6 +72,7 @@ ggplot(data, aes(x = Status, fill = Status)) +
   theme_minimal() +
   scale_fill_manual(values = c("lightblue", "pink"))
 ```
+
 For logistic regression, the binary outcome variable (Status: Dead/Alive) does not require transformation, as logistic regression inherently models binary outcomes.
 
 ### Transformation
@@ -110,6 +111,7 @@ numerical_skewness <- tibble(
 # Display the skewness table
 kable(numerical_skewness, col.names = c("Variable", "Skewness"), caption = "Skewness of Numerical Variables")
 ```
+
 After our initial detection, we found out that: 
 
 * Reginol.Node.Positive variable show slightly nonlinear with the logit of Status, it need transformation.
@@ -177,3 +179,46 @@ data_final <- data %>%
   mutate(across(all_of(categorical_vars), ~ as.factor(.))) %>%  
   model.matrix(~ . - 1, data = .) %>%  
   as.data.frame() 
+```
+
+Lasso + model:
+```{r}
+# 去除 Reginol_Node_Positive 和 Tumor_Size
+data_final_1 <- data_final %>%
+  select(-c(`Reginol.Node.Positive`, `Tumor.Size`))
+
+library(glmnet)
+x <- model.matrix(Status ~ ., data = data_final_1)[, -1]  # 去掉截距列
+y <- data_final_1$Status
+
+# 使用 Lasso 进行变量筛选
+lasso_cv <- cv.glmnet(x, y, family = "binomial", alpha = 1)
+
+# 获取最佳正则化参数 lambda
+best_lambda <- lasso_cv$lambda.min
+print(paste("Optimal lambda:", best_lambda))
+
+# 使用最佳 lambda 拟合 Lasso 模型
+lasso_model <- glmnet(x, y, family = "binomial", alpha = 1, lambda = best_lambda)
+
+# 提取 Lasso 模型的系数
+lasso_coefficients <- coef(lasso_model)
+
+# 转换为标准矩阵格式
+lasso_coefficients_matrix <- as.matrix(lasso_coefficients)
+
+# 提取非零系数对应的变量名（去掉截距项）
+selected_vars <- rownames(lasso_coefficients_matrix)[lasso_coefficients_matrix != 0][-1]
+
+# 输出筛选出的变量
+print("Selected variables:")
+print(selected_vars)
+
+# 构建最终的逻辑回归模型
+final_formula <- as.formula(paste("Status ~", paste(selected_vars, collapse = " + ")))
+final_model <- glm(final_formula, data = data_final_1, family = "binomial")
+
+# 输出最终模型的摘要
+summary(final_model)
+
+```
