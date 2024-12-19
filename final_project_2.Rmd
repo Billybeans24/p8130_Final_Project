@@ -1,0 +1,179 @@
+---
+title: "p8130_final_project_2"
+output: pdf_document
+date: "2024-12-19"
+---
+
+# Project 2: Breast cancer survival prediction
+
+```{r, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(knitr)
+library(car) 
+library(e1071)
+library(ggplot2)
+```
+
+## Data exploration
+
+### Descriptive table with summary statistics
+
+```{r}
+data <- read.csv("Project_2_data.csv")
+numerical_summary <- data %>%
+  select_if(is.numeric) %>%
+  summarise_all(list(
+    count = ~sum(!is.na(.)),
+    mean = mean,
+    std = sd,
+    min = min,
+    median = median,
+    max = max
+  )) %>%
+  pivot_longer(cols = everything(), names_to = "Variable", values_to = "Value") %>%
+  separate(Variable, into = c("Variable", "Statistic"), sep = "_")
+
+formatted_summary <- numerical_summary %>%
+  pivot_wider(names_from = Statistic, values_from = Value)
+
+kable(formatted_summary, col.names = c("Variable", "Count", "Mean", "Std", "Min", "Median", "Max"), caption = "Numerical Variables Summary Statistics")
+```
+
+```{r}
+categorical_vars <- data %>% select_if(is.character)
+category_summary <- categorical_vars %>%
+  gather(Variable, Category) %>%
+  group_by(Variable, Category) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  mutate(Percentage = round((Count / sum(Count)) * 100, 1)) %>%
+  arrange(Variable, desc(Count))
+
+formatted_summary <- category_summary %>%
+  group_by(Variable) %>%
+  mutate(Variable = ifelse(row_number() == 1, Variable, ""))
+
+kable(formatted_summary, col.names = c("Variable", "Category", "Count", "Percentage (%)"), caption = "Category Distribution of Categorical Variables")
+
+```
+
+### Explore the Distribution of the Outcome (Status: Dead / Alive)
+```{r}
+status_distribution <- data %>%
+  group_by(Status) %>%
+  summarise(Count = n()) %>%
+  mutate(Proportion = Count / sum(Count))
+
+kable(status_distribution, col.names = c("Status", "Count", "Proportion"), caption = "Distribution of Survival Status (Dead/Alive)")
+
+ggplot(data, aes(x = Status, fill = Status)) +
+  geom_bar() +
+  labs(title = "Distribution of Survival Status", x = "Status", y = "Count") +
+  theme_minimal() +
+  scale_fill_manual(values = c("lightblue", "pink"))
+```
+For logistic regression, the binary outcome variable (Status: Dead/Alive) does not require transformation, as logistic regression inherently models binary outcomes.
+
+### Transformation
+```{r}
+# Identify numerical variables
+numerical_vars <- data %>%
+  select_if(is.numeric) %>%
+  select(-`Survival.Months`)
+
+# Display the list of numerical variables
+names(numerical_vars)
+# Convert Status to a binary numeric variable
+data$Status <- ifelse(data$Status == "Dead", 1, 0)
+
+# Scatterplots for each numerical variable against the logit
+logit <- function(p) log(p / (1 - p))  # Logit function
+
+numerical_vars %>%
+  names() %>%
+  map(~ ggplot(data, aes_string(x = ., y = "Status")) +
+        stat_smooth(method = "glm", method.args = list(family = "binomial"), se = FALSE, color = "blue") +
+        geom_point(alpha = 0.5) +
+        labs(title = paste("Relationship Between", ., "and Logit of Status"), x = ., y = "Logit(Status)") +
+        theme_minimal())
+# Calculate skewness for numerical variables
+numerical_skewness <- numerical_vars %>%
+  map_df(~ tibble(Variable = deparse(substitute(.)),
+                  Skewness = skewness(., na.rm = TRUE)))
+
+# Correct the Variable column
+numerical_skewness <- tibble(
+  Variable = colnames(numerical_vars),
+  Skewness = sapply(numerical_vars, skewness, na.rm = TRUE)
+)
+
+# Display the skewness table
+kable(numerical_skewness, col.names = c("Variable", "Skewness"), caption = "Skewness of Numerical Variables")
+```
+After our initial detection, we found out that: 
+
+* Reginol.Node.Positive variable show slightly nonlinear with the logit of Status, it need transformation.
+
+* The skewness analysis reveals that Age (-0.22) has a roughly symmetric distribution, requiring no transformation. Tumor Size (1.74) shows moderate right skewness, suggesting a potential log transformation to normalize the distribution, though it may not be strictly necessary. Regional Node Examined (0.83) has mild positive skewness and can likely be retained in its current form unless further diagnostics indicate otherwise. Reginol Node Positive (2.70), with significant right skewness, would benefit from a log transformation to reduce skewness and stabilize its relationship with the logit in the logistic regression model. These adjustments ensure numerical variables are well-prepared for regression analysis.
+
+Base on the analysis above, try to make log transformation on Reginol Node Positive & Tumor Size.
+
+```{r}
+data <- data %>%
+  mutate(
+    Log_Reginol_Node_Positive = log1p(`Reginol.Node.Positive`),
+    Log_Tumor_Size = log1p(`Tumor.Size`)
+  )
+transformed_skewness <- data %>%
+  select(Log_Reginol_Node_Positive, Log_Tumor_Size) %>%
+  summarise_all(~ skewness(.))
+
+# Combine with variable names
+transformed_skewness_table <- tibble(
+  Variable = c("Log_Reginol_Node_Positive", "Log_Tumor_Size"),
+  Skewness = as.numeric(transformed_skewness)
+)
+
+# Display the updated skewness table
+kable(transformed_skewness_table, col.names = c("Variable", "Skewness"), caption = "Skewness of Transformed Variables")
+
+## 2. Plots for Transformed Variables Against Logit of Status
+logit <- function(p) log(p / (1 - p))  # Logit function
+
+# Plot for Log_Reginol_Node_Positive
+ggplot(data, aes(x = Log_Reginol_Node_Positive, y = Status)) +
+  stat_smooth(method = "glm", method.args = list(family = "binomial"), se = FALSE, color = "blue") +
+  geom_point(alpha = 0.5) +
+  labs(title = "Relationship Between Log_Reginol_Node_Positive and Logit of Status", x = "Log_Reginol_Node_Positive", y = "Logit(Status)") +
+  theme_minimal()
+
+# Plot for Log_Tumor_Size
+ggplot(data, aes(x = Log_Tumor_Size, y = Status)) +
+  stat_smooth(method = "glm", method.args = list(family = "binomial"), se = FALSE, color = "blue") +
+  geom_point(alpha = 0.5) +
+  labs(title = "Relationship Between Log_Tumor_Size and Logit of Status", x = "Log_Tumor_Size", y = "Logit(Status)") +
+  theme_minimal()
+```
+
+comments:
+
+* For Log_Reginol_Node_Positive, the skewness improved from 2.70 to 0.99, indicating a significant reduction in skewness. While still slightly positively skewed, the value is now within an acceptable range for modeling.
+
+* For Log_Tumor_Size, the skewness reduced from 1.74 to -0.09, making it almost symmetric. This transformation effectively normalized the variable.
+
+* For Log_Reginol_Node_Positive, the log transformation on Reginol.Node.Positive likely improved its relationship with the logit
+
+* For Log_Tumor_Size, the curvature is still present after the transformation, and the linearity with the logit has not significantly improved. 
+
+As a result, we should definitely conduct a log transformation on Log_Reginol_Node_Positive, we are not sure on Log_Tumor_Size, we can evaluate it in model selection.
+
+Finally, we need to change all the catagorical variable to dummy variable:
+```{r}
+categorical_vars <- data %>%
+  select_if(is.character) %>%
+  names()
+
+data_final <- data %>%
+  mutate(across(all_of(categorical_vars), ~ as.factor(.))) %>%  
+  model.matrix(~ . - 1, data = .) %>%  
+  as.data.frame() 
