@@ -167,11 +167,11 @@ Comments:
 
 * For Log_Tumor_Size, the skewness reduced from 1.74 to -0.09, making it almost symmetric. This transformation effectively normalized the variable.
 
-* For Log_Reginol_Node_Positive, the log transformation on Reginol.Node.Positive likely improved its relationship with the logit
+* For Log_Reginol_Node_Positive, the log transformation on Reginol.Node.Positive likely improved its relationship with the logit as well. 
 
-* For Log_Tumor_Size, the curvature is still present after the transformation, and the linearity with the logit has not significantly improved. 
+* For Log_Tumor_Size, after the transformation the linearity with the logit has not significantly improved, but at least the skewness reduced.
 
-As a result, we should definitely conduct a log transformation on Log_Reginol_Node_Positive, we are not sure on Log_Tumor_Size, we can evaluate it in model selection.
+As a result, we should definitely conduct a log transformation on Reginol.Node.Positive and Tumor.Size.
 
 ```{r}
 data=data |>
@@ -179,7 +179,7 @@ data=data |>
 ```
 
 ```{r}
-# check for multicollinearity among numeric variables
+# Compute correlation coefficients among numeric variables
 selected_vars <- c("Age", "Log_Reginol_Node_Positive", "Log_Tumor_Size","Regional.Node.Examined")
 
 subset_data <- data[, selected_vars]
@@ -193,16 +193,17 @@ if (all(sapply(subset_data, is.numeric))) {
 None of the correlation coefficients between numeric variables exceed 0.5, indicating that there is no strong linear relationship between each pair of numeric variables.
 
 ```{r}
-# Checking for highly consistent category variables
-
-category1 <- "differentiate"
-category2 <- "Grade"
-
-contingency_table <- table(data[[category1]], data[[category2]])
+# Identify highly consistent category variables
+contingency_table <- table(data[["differentiate"]], data[["Grade"]])
 print(contingency_table)
 ```
 
 We discover that complete linear dependency exist among Grade and differentiate, so we can only include one of them in the prediction model, so differentiate is excluded.
+
+```{r}
+data=data |>
+  select(-differentiate)
+```
 
 Finally, we need to change all the catagorical variables to dummy variables:
 ```{r}
@@ -215,51 +216,56 @@ data_final <- data %>%
   model.matrix(~ . - 1, data = .) %>%  
   as.data.frame() 
 
+data_final = data_final |>
+  select(-`Survival.Months`)
+
 head(data_final,10)
 ```
 
-Lasso + model:
+After basic data preprocessing, we use lasso regression to help select the variables used as predictors.
+
 ```{r}
-x <- model.matrix(Status ~ ., data = data_final)[, -1]  # 去掉截距列
+x <- model.matrix(Status ~ ., data = data_final)[, -1]
 y <- data_final$Status
 
-# 使用 Lasso 进行变量筛选
+# Perform cross-validation for Lasso regression
 lasso_cv <- cv.glmnet(x, y, family = "binomial", alpha = 1)
 
-# 获取最佳正则化参数 lambda
+# Get the optimal regularization parameter lambda
 best_lambda <- lasso_cv$lambda.min
 print(paste("Optimal lambda:", best_lambda))
 
-# 使用最佳 lambda 拟合 Lasso 模型
+# Fit the Lasso model using the optimal lambda
 lasso_model <- glmnet(x, y, family = "binomial", alpha = 1, lambda = best_lambda)
 
-# 提取 Lasso 模型的系数
+# Extract the coefficients from the Lasso model
 lasso_coefficients <- coef(lasso_model)
 
-# 转换为标准矩阵格式
+# Convert coefficients to a standard matrix format
 lasso_coefficients_matrix <- as.matrix(lasso_coefficients)
 
-# 提取非零系数对应的变量名（去掉截距项）
-selected_vars <- rownames(lasso_coefficients_matrix)[lasso_coefficients_matrix != 0][-1]
+# Extract variable names with non-zero coefficients (excluding the intercept)
+selected_vars <- rownames(lasso_coefficients_matrix)[lasso_coefficients_matrix[, 1] != 0][-1]
 
-# 输出筛选出的变量
+# Output the selected variables
 print("Selected variables:")
 print(selected_vars)
 
-# 构建最终的逻辑回归模型
+# Construct the logistic regression formula
 final_formula <- as.formula(paste("Status ~", paste(selected_vars, collapse = " + ")))
+
+# Fit the final logistic regression model
 final_model <- glm(final_formula, data = data_final, family = "binomial")
 
-# 输出最终模型的摘要
+# Output the summary of the final model
 summary(final_model)
-
 ```
+
 ```{r}
-# Identify aliased (linearly dependent) coefficients
+# Check for linear dependencies (aliased variables)
 alias_info <- alias(final_model)
 print(alias_info)
 
-# Extract the names of aliased coefficients, if any
 if (!is.null(alias_info$Complete)) {
   aliased_vars <- rownames(alias_info$Complete)
   print("Aliased (linearly dependent) variables:")
@@ -267,62 +273,41 @@ if (!is.null(alias_info$Complete)) {
 } else {
   print("No aliased coefficients found.")
 }
-
 ```
 
+The variable "X6th" is excluded from the model because one of its levels, X6th.StageIIIC, was identified as an aliased (linearly dependent) variable. Specifically, X6th.StageIIIC was found to be perfectly correlated with N.StageN3, which can cause multicollinearity issues and lead to instability in coefficient estimation. Removing X6th ensures a more robust and interpretable model.
 
 ```{r}
-# Check if there are aliased coefficients
-if (!is.null(alias_info$Complete)) {
-  # Extract the names of aliased variables
-  aliased_vars <- rownames(alias_info$Complete)
-  
-  # Print aliased variables
-  print("Aliased (linearly dependent) variables:")
-  print(aliased_vars)
-  
-  # Strategy: Remove the last variable in each aliased set
-  # This can be adjusted based on domain knowledge or other criteria
-  vars_to_remove <- sapply(strsplit(aliased_vars, ":"), tail, n = 1)
-  
-  print("Variables to remove to resolve aliasing:")
-  print(vars_to_remove)
-  
-  # Update the selected_vars by removing the problematic variables
-  selected_vars_updated <- setdiff(selected_vars, vars_to_remove)
-  
-  print("Updated list of selected variables after removing aliased variables:")
-  print(selected_vars_updated)
-  
-  # Reconstruct the final formula without the aliased variables
-  final_formula_updated <- as.formula(paste("Status ~", paste(selected_vars_updated, collapse = " + ")))
-  
-  # Refit the logistic regression model without aliased variables
-  final_model_updated <- glm(final_formula_updated, data = data_final, family = "binomial")
-  
-  
-} else {
-  print("No aliased coefficients to address. Proceeding to calculate VIF.")
-  final_model_updated <- final_model  # No changes needed
-}
+# Remove X6th-related variables from selected_vars
+X6th_related <- c("X6th.StageIIB", "X6th.StageIIIB", "X6th.StageIIIC")
+selected_vars_updated <- setdiff(selected_vars, X6th_related)
+
+# Output the updated selected variables
+print("Updated selected variables:")
+print(selected_vars_updated)
+
+# Construct the updated logistic regression formula
+updated_formula <- as.formula(paste("Status ~", paste(selected_vars_updated, collapse = " + ")))
+
+# Fit the updated logistic regression model
+final_model_updated <- glm(updated_formula, data = data_final, family = "binomial")
+
+# Output the summary of the updated model
+summary(final_model_updated)
 
 ```
+
 ```{r}
 # Calculate Variance Inflation Factor (VIF) for the updated model
 vif_values_updated <- vif(final_model_updated)
 print("Variance Inflation Factors (VIF) for the updated model:")
 print(vif_values_updated)
 
-# Optionally, visualize VIF values
-library(ggplot2)
-
-# Create a data frame for plotting
 vif_df <- data.frame(
   Variable = names(vif_values_updated),
   VIF = vif_values_updated
 )
 
-# Plot VIF values
 ggplot(vif_df, aes(x = reorder(Variable, VIF), y = VIF)) +
   geom_bar(stat = "identity", fill = "steelblue") +
   geom_hline(yintercept = 5, color = "red", linetype = "dashed") +
@@ -331,9 +316,8 @@ ggplot(vif_df, aes(x = reorder(Variable, VIF), y = VIF)) +
        y = "VIF") +
   coord_flip() +
   theme_minimal()
-
-
 ```
+
 ```{r}
 
 threshold <- 0.5 
@@ -348,6 +332,7 @@ conf_matrix_updated <- confusionMatrix(as.factor(pred_classes_updated), as.facto
 print(conf_matrix_updated)
 
 ```
+
 ```{r}
 # Install and load necessary package
 if(!require(pROC)) install.packages("pROC")
