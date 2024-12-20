@@ -254,3 +254,182 @@ final_model <- glm(final_formula, data = data_final, family = "binomial")
 summary(final_model)
 
 ```
+
+```{r}
+############################################################
+# Model Diagnostics (No Interaction Yet)
+############################################################
+final_model <- glm(final_formula, data = data_final, family = "binomial", x=TRUE, y=TRUE)
+
+# 1. VIF
+vif_values <- vif(final_model)
+cat("VIF Values:\n")
+print(vif_values)
+
+# Get predictions
+pred_prob <- predict(final_model, type = "response")
+
+# Check lengths
+if(length(pred_prob) != length(data_final$Status)){
+  stop("pred_prob and Status differ in length!")
+}
+
+# Check for NAs
+if(any(is.na(data_final$Status)) || any(is.na(pred_prob))){
+  stop("NAs found in Status or pred_prob!")
+}
+
+# 2. Hosmer-Lemeshow Test
+hl_test <- tryCatch({
+  hoslem.test(data_final$Status, pred_prob, g=5)
+})
+cat("Hosmer-Lemeshow Test:\n")
+print(hl_test)
+
+# 3. Influential Observations
+influence_measures_res <- influence.measures(final_model)
+summary(influence_measures_res)
+
+# 4. Linearity Check (e.g., Log_Tumor_Size)
+if("Log_Tumor_Size" %in% selected_vars) {
+  crPlots(final_model, terms = "Log_Tumor_Size")
+}
+
+# 5. ROC and AUC
+roc_obj <- roc(data_final$Status, pred_prob)
+auc_value <- auc(roc_obj)
+cat("Overall AUC:", auc_value, "\n")
+plot(roc_obj, main=paste("ROC Curve, AUC =", round(auc_value,3)))
+
+
+```
+
+```{r}
+# Histogram of predicted probabilities
+ggplot(data_final, aes(x = pred_prob)) +
+  geom_histogram(binwidth = 0.05, fill = "steelblue", color = "black") +
+  labs(title = "Distribution of Predicted Probabilities", x = "Predicted Probability", y = "Frequency") +
+  theme_minimal()
+
+```
+
+```{r}
+# Check if both variables are selected
+if(all(c("RaceBlack", "Log_Tumor_Size") %in% selected_vars)) {
+  
+  # Update formula to include interaction
+  final_formula_inter <- update(final_formula, . ~ . + RaceBlack:Log_Tumor_Size)
+  
+  # Fit the Interaction Model
+  final_model_inter <- glm(final_formula_inter, data = data_final, family = "binomial")
+  
+  # Check for Aliasing
+  alias_results_inter <- alias(final_model_inter)
+  print(alias_results_inter)
+  
+  # If Aliasing Exists, Remove Problematic Terms
+  problem_vars_inter <- rownames(alias_results_inter$Complete)[rowSums(alias_results_inter$Complete) > 0]
+  if(length(problem_vars_inter) > 0) {
+    selected_vars <- setdiff(selected_vars, problem_vars_inter)
+    final_formula_inter <- as.formula(paste("Status ~", paste(selected_vars, collapse = " + "), "+ RaceBlack:Log_Tumor_Size"))
+    final_model_inter <- glm(final_formula_inter, data = data_final, family = "binomial")
+  }
+  
+  # Summary of Interaction Model
+  summary(final_model_inter)
+  
+  # Re-run Diagnostics for Interaction Model
+  
+  # VIF
+  vif_values_inter <- vif(final_model_inter)
+  kable(as.data.frame(vif_values_inter), 
+        col.names = c("VIF"), 
+        caption = "VIF Values for Interaction Model Predictors")
+  
+  # Predictions
+  pred_prob_inter <- predict(final_model_inter, type = "response")
+  
+  # Hosmer-Lemeshow Test for Interaction Model
+  hl_test_inter <- tryCatch({
+    ResourceSelection::hoslem.test(data_final$Status, pred_prob_inter, g = 5)
+  }, error = function(e) {
+    message("Hosmer-Lemeshow test failed with g=5 for interaction model. Trying g=3...")
+    ResourceSelection::hoslem.test(data_final$Status, pred_prob_inter, g = 3)
+  })
+  
+  cat("Hosmer-Lemeshow Test (Interaction Model):\n")
+  print(hl_test_inter)
+  
+  # Manual Hosmer-Lemeshow Test for Interaction Model
+  if(inherits(hl_test_inter, "try-error")) {
+    cat("Implementing Manual Hosmer-Lemeshow Test for Interaction Model...\n")
+    
+    # Create Deciles
+    data_final <- data_final %>%
+      mutate(decile_inter = ntile(pred_prob_inter, 10))
+    
+    # Calculate Observed and Expected Counts per Decile
+    hl_manual_inter <- data_final %>%
+      group_by(decile_inter) %>%
+      summarise(
+        observed = sum(Status),
+        expected = sum(pred_prob_inter),
+        n = n()
+      ) %>%
+      mutate(
+        variance = expected * (1 - mean(pred_prob_inter)),
+        chi_square = (observed - expected)^2 / variance
+      )
+    
+    # Total Chi-Square Statistic
+    chi_square_total_inter <- sum(hl_manual_inter$chi_square)
+    degrees_freedom_inter <- 10 - 2  # g - number of parameters
+    
+    # P-Value
+    p_value_hl_manual_inter <- 1 - pchisq(chi_square_total_inter, df = degrees_freedom_inter)
+    
+    # Display Results
+    kable(hl_manual_inter, 
+          col.names = c("Decile", "Observed", "Expected", "n", "Variance", "Chi-Square"),
+          caption = "Manual Hosmer-Lemeshow Test Table for Interaction Model")
+    
+    cat("Manual Hosmer-Lemeshow Test (Interaction Model):\n")
+    cat("Chi-Square:", round(chi_square_total_inter, 2), 
+        "Degrees of Freedom:", degrees_freedom_inter, 
+        "P-Value:", round(p_value_hl_manual_inter, 4), "\n")
+  }
+  
+  # Influential Observations for Interaction Model
+  influence_measures_res_inter <- influence.measures(final_model_inter)
+  summary(influence_measures_res_inter)
+  
+  # Linearity Check
+  if("Log_Tumor_Size" %in% selected_vars) {
+    crPlots(final_model_inter, terms = "Log_Tumor_Size")
+  }
+  
+  # ROC and AUC for Interaction Model
+  roc_obj_inter <- roc(data_final$Status, pred_prob_inter)
+  auc_value_inter <- auc(roc_obj_inter)
+  cat("Overall AUC (Interaction Model):", auc_value_inter, "\n")
+  
+  # Plot ROC Curve
+  plot(roc_obj_inter, main = paste("ROC Curve (Interaction Model), AUC =", round(auc_value_inter, 3)))
+  
+  # Compare AICs
+  cat("AIC without Interaction:", AIC(final_model), "\n")
+  cat("AIC with Interaction:", AIC(final_model_inter), "\n")
+  
+  # Likelihood Ratio Test
+  anova(final_model, final_model_inter, test = "Chisq")
+  
+  # Update model_to_interpret for Interpretation
+  model_to_interpret <- final_model_inter
+} else {
+  model_to_interpret <- final_model
+}
+
+```
+
+
+
