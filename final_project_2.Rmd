@@ -8,11 +8,10 @@ date: "2024-12-19"
 
 ```{r, include=FALSE}
 library(tidyverse)
-library(ggplot2)
 library(knitr)
 library(car) 
 library(e1071)
-library(ggplot2)
+library(glmnet)
 ```
 
 ## Data exploration
@@ -21,6 +20,8 @@ library(ggplot2)
 
 ```{r}
 data <- read.csv("Project_2_data.csv")
+head(data,10)
+
 numerical_summary <- data %>%
   select_if(is.numeric) %>%
   summarise_all(list(
@@ -42,11 +43,12 @@ kable(formatted_summary, col.names = c("Variable", "Count", "Mean", "Std", "Min"
 
 ```{r}
 categorical_vars <- data %>% select_if(is.character)
+
 category_summary <- categorical_vars %>%
   gather(Variable, Category) %>%
   group_by(Variable, Category) %>%
   summarise(Count = n()) %>%
-  mutate(Percentage = round((Count / sum(Count)) * 100, 1)) %>%
+  mutate(Percentage = round((Count / sum(Count)) * 100, 2)) %>%
   arrange(Variable, desc(Count))
 
 formatted_summary <- category_summary %>%
@@ -54,7 +56,6 @@ formatted_summary <- category_summary %>%
   mutate(Variable = ifelse(row_number() == 1, Variable, ""))
 
 kable(formatted_summary, col.names = c("Variable", "Category", "Count", "Percentage (%)"), caption = "Category Distribution of Categorical Variables")
-
 ```
 
 ### Explore the Distribution of the Outcome (Status: Dead / Alive)
@@ -92,11 +93,14 @@ logit <- function(p) log(p / (1 - p))  # Logit function
 
 numerical_vars %>%
   names() %>%
-  map(~ ggplot(data, aes_string(x = ., y = "Status")) +
+  map(~ ggplot(data, aes(x = .data[[.x]], y = Status)) +
         stat_smooth(method = "glm", method.args = list(family = "binomial"), se = FALSE, color = "blue") +
         geom_point(alpha = 0.5) +
-        labs(title = paste("Relationship Between", ., "and Logit of Status"), x = ., y = "Logit(Status)") +
+        labs(title = paste("Relationship Between", .x, "and Logit of Status"), 
+             x = .x, 
+             y = "Logit(Status)") +
         theme_minimal())
+
 # Calculate skewness for numerical variables
 numerical_skewness <- numerical_vars %>%
   map_df(~ tibble(Variable = deparse(substitute(.)),
@@ -139,7 +143,7 @@ transformed_skewness_table <- tibble(
 # Display the updated skewness table
 kable(transformed_skewness_table, col.names = c("Variable", "Skewness"), caption = "Skewness of Transformed Variables")
 
-## 2. Plots for Transformed Variables Against Logit of Status
+## Plots for Transformed Variables Against Logit of Status
 logit <- function(p) log(p / (1 - p))  # Logit function
 
 # Plot for Log_Reginol_Node_Positive
@@ -157,7 +161,7 @@ ggplot(data, aes(x = Log_Tumor_Size, y = Status)) +
   theme_minimal()
 ```
 
-comments:
+Comments:
 
 * For Log_Reginol_Node_Positive, the skewness improved from 2.70 to 0.99, indicating a significant reduction in skewness. While still slightly positively skewed, the value is now within an acceptable range for modeling.
 
@@ -169,7 +173,38 @@ comments:
 
 As a result, we should definitely conduct a log transformation on Log_Reginol_Node_Positive, we are not sure on Log_Tumor_Size, we can evaluate it in model selection.
 
-Finally, we need to change all the catagorical variable to dummy variable:
+```{r}
+data=data |>
+  select(-`Reginol.Node.Positive`, -`Tumor.Size`)
+```
+
+```{r}
+# check for multicollinearity among numeric variables
+selected_vars <- c("Age", "Log_Reginol_Node_Positive", "Log_Tumor_Size","Regional.Node.Examined")
+
+subset_data <- data[, selected_vars]
+
+if (all(sapply(subset_data, is.numeric))) {
+  correlation_matrix <- cor(subset_data, use = "pairwise.complete.obs")
+  print(correlation_matrix)
+}
+```
+
+None of the correlation coefficients between numeric variables exceed 0.5, indicating that there is no strong linear relationship between each pair of numeric variables.
+
+```{r}
+# Checking for highly consistent category variables
+
+category1 <- "differentiate"
+category2 <- "Grade"
+
+contingency_table <- table(data[[category1]], data[[category2]])
+print(contingency_table)
+```
+
+We discover that complete linear dependency exist among Grade and differentiate, so we can only include one of them in the prediction model, so differentiate is excluded.
+
+Finally, we need to change all the catagorical variables to dummy variables:
 ```{r}
 categorical_vars <- data %>%
   select_if(is.character) %>%
@@ -179,17 +214,14 @@ data_final <- data %>%
   mutate(across(all_of(categorical_vars), ~ as.factor(.))) %>%  
   model.matrix(~ . - 1, data = .) %>%  
   as.data.frame() 
+
+head(data_final,10)
 ```
 
 Lasso + model:
 ```{r}
-# 去除 Reginol_Node_Positive 和 Tumor_Size
-data_final_1 <- data_final %>%
-  select(-c(`Reginol.Node.Positive`, `Tumor.Size`))
-
-library(glmnet)
-x <- model.matrix(Status ~ ., data = data_final_1)[, -1]  # 去掉截距列
-y <- data_final_1$Status
+x <- model.matrix(Status ~ ., data = data_final)[, -1]  # 去掉截距列
+y <- data_final$Status
 
 # 使用 Lasso 进行变量筛选
 lasso_cv <- cv.glmnet(x, y, family = "binomial", alpha = 1)
@@ -216,7 +248,7 @@ print(selected_vars)
 
 # 构建最终的逻辑回归模型
 final_formula <- as.formula(paste("Status ~", paste(selected_vars, collapse = " + ")))
-final_model <- glm(final_formula, data = data_final_1, family = "binomial")
+final_model <- glm(final_formula, data = data_final, family = "binomial")
 
 # 输出最终模型的摘要
 summary(final_model)
