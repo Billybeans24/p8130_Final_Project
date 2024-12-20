@@ -12,6 +12,8 @@ library(knitr)
 library(car) 
 library(e1071)
 library(glmnet)
+library(caret)
+library(pROC)
 ```
 
 ## Data exploration
@@ -171,7 +173,7 @@ Comments:
 
 * For Log_Tumor_Size, after the transformation the linearity with the logit has not significantly improved, but at least the skewness reduced.
 
-As a result, we should definitely conduct a log transformation on Reginol.Node.Positive and Tumor.Size.
+As a result, we should definitely conduct a log transformation on Reginol.Node.Positive and Tumor.Size (so the two original variables can be removed).
 
 ```{r}
 data=data |>
@@ -275,12 +277,12 @@ if (!is.null(alias_info$Complete)) {
 }
 ```
 
-The variable "X6th" is excluded from the model because one of its levels, X6th.StageIIIC, was identified as an aliased (linearly dependent) variable. Specifically, X6th.StageIIIC was found to be perfectly correlated with N.StageN3, which can cause multicollinearity issues and lead to instability in coefficient estimation. Removing X6th ensures a more robust and interpretable model.
+X6th.StageIIIC was identified as an aliased (linearly dependent) variable, being perfectly correlated with N.StageN3. This redundancy can cause multicollinearity issues and instability in coefficient estimation. Both X6th.StageIIIC and N.StageN3 were removed to ensure a more stable and interpretable model.
 
 ```{r}
-# Remove X6th-related variables from selected_vars
-X6th_N3 <- c("N.StageN3", "X6th.StageIIIC")
-selected_vars_updated <- setdiff(selected_vars, X6th_N3)
+# Remove X6th.StageIIIC and N.StageN3 from selected_vars
+vars_to_remove <- c("X6th.StageIIIC", "N.StageN3")
+selected_vars_updated <- setdiff(selected_vars, vars_to_remove)
 
 # Output the updated selected variables
 print("Updated selected variables:")
@@ -294,7 +296,6 @@ final_model_updated <- glm(updated_formula, data = data_final, family = "binomia
 
 # Output the summary of the updated model
 summary(final_model_updated)
-
 ```
 
 ```{r}
@@ -318,134 +319,10 @@ ggplot(vif_df, aes(x = reorder(Variable, VIF), y = VIF)) +
   theme_minimal()
 ```
 
-```{r}
+After removing X6th.StageIIIC and N.StageN3 and refitting the updated logistic regression model, the Variance Inflation Factor (VIF) values were recalculated. The results indicate that all predictor variables now have VIF values below 5, suggesting that multicollinearity among the independent variables has been successfully resolved.
 
-threshold <- 0.5 
-# Predict probabilities using the updated model
-pred_probs_updated <- predict(final_model_updated, type = "response")
+We can extract coefficients from the updated final model and show them.
 
-# Set the same classification threshold
-pred_classes_updated <- ifelse(pred_probs_updated >= threshold, 1, 0)
-
-# Generate the confusion matrix for the updated model
-conf_matrix_updated <- confusionMatrix(as.factor(pred_classes_updated), as.factor(y), positive = "1")
-print(conf_matrix_updated)
-
-```
-
-```{r}
-# Install and load necessary package
-if(!require(pROC)) install.packages("pROC")
-library(pROC)
-
-# Compute ROC curve
-roc_obj <- roc(y, pred_probs_updated)
-
-# Plot ROC curve
-plot(roc_obj, col = "blue", main = "ROC Curve for Final Logistic Regression Model")
-abline(a = 0, b = 1, lty = 2, col = "red")  # Diagonal line for reference
-
-# Calculate and print AUC
-auc_value <- auc(roc_obj)
-print(paste("AUC:", round(auc_value, 3)))
-
-```
-```{r}
-# Install and load necessary package
-if(!require(ggplot2)) install.packages("ggplot2")
-library(ggplot2)
-
-# Create calibration data by binning predicted probabilities
-calibration_data <- data.frame(
-  predicted = pred_probs_updated,
-  actual = y
-)
-
-# Plot calibration
-ggplot(calibration_data, aes(x = predicted, y = actual)) +
-  stat_summary_bin(fun = mean, bins = 10, geom = "line", color = "blue") +
-  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
-  labs(title = "Calibration Plot", x = "Predicted Probability", y = "Observed Proportion") +
-  theme_minimal()
-
-```
-
-```{r}
-# Ensure 'Race' is included in data_final
-if(!"Race" %in% colnames(data_final)){
-  data_final$Race <- data$Race
-}
-
-# Define race groups: "White" and "Black_Other"
-data_final <- data_final %>%
-  mutate(Race_Group = ifelse(Race == "White", "White", "Black_Other"))
-
-# Function to compute performance metrics
-compute_metrics <- function(actual, predicted, probs, group_name) {
-  cm <- confusionMatrix(as.factor(predicted), as.factor(actual), positive = "1")
-  roc_obj <- roc(actual, probs)
-  auc_val <- auc(roc_obj)
-  
-  return(data.frame(
-    Group = group_name,
-    Accuracy = round(cm$overall['Accuracy'], 3),
-    Precision = round(cm$byClass['Precision'], 3),
-    Recall = round(cm$byClass['Recall'], 3),
-    F1 = round(cm$byClass['F1'], 3),
-    AUC = round(auc_val, 3)
-  ))
-}
-
-# Initialize list to store metrics
-metrics_list <- list()
-
-# Iterate over each race group
-for(group in unique(data_final$Race_Group)) {
-  idx <- which(data_final$Race_Group == group)
-  actual_group <- y[idx]
-  probs_group <- pred_probs_updated[idx]
-  predicted_group <- pred_classes_updated[idx]
-  
-  metrics <- compute_metrics(actual_group, predicted_group, probs_group, group)
-  metrics_list[[group]] <- metrics
-}
-
-# Combine metrics into a single data frame
-metrics_df <- bind_rows(metrics_list)
-print(metrics_df)
-
-
-```
-```{r}
-# Compute ROC curves for each group
-roc_white <- roc(y[data_final$Race_Group == "White"], pred_probs_updated[data_final$Race_Group == "White"])
-roc_black_other <- roc(y[data_final$Race_Group == "Black_Other"], pred_probs_updated[data_final$Race_Group == "Black_Other"])
-
-# Perform DeLong's test to compare AUCs
-delong_test <- roc.test(roc_white, roc_black_other, method = "delong")
-print(delong_test)
-
-```
-
-
-```{r}
-# Calculate Cook's Distance
-cooks_d <- cooks.distance(final_model_updated)
-
-# Plot Cook's Distance
-plot(cooks_d, type = "h", main = "Cook's Distance", ylab = "Cook's Distance")
-abline(h = 4/(nrow(data_final) - length(final_model_updated$coefficients) - 1), col = "red", lty = 2)
-
-# Identify influential points
-influential_threshold <- 4/(nrow(data_final) - length(final_model_updated$coefficients) - 1)
-influential_points <- which(cooks_d > influential_threshold)
-print(paste("Number of influential points:", length(influential_points)))
-
-# Inspect influential observations
-influential_data <- data_final[influential_points, ]
-kable(head(influential_data, 10), caption = "Influential Observations")
-
-```
 ```{r}
 # Extract coefficients from the updated final model
 coefficients_updated <- summary(final_model_updated)$coefficients
@@ -470,21 +347,160 @@ summary_table_updated <- summary_table_updated %>%
 
 # Display the summary table
 kable(summary_table_updated, digits = 3, caption = "Final Logistic Regression Model Summary")
+```
+
+Then we need to evaluate model performance by computing some matrix. Set the threshold to 0.5, meaning that any predicted probability greater than or equal to 0.5 is classified as the positive class (1) (in our case, dead), while probabilities below 0.5 are classified as the negative class (0) (in our case, alive). 
+
+```{r}
+threshold <- 0.5 
+# Predict probabilities using the updated model
+pred_probs_updated <- predict(final_model_updated, type = "response")
+
+pred_classes_updated <- ifelse(pred_probs_updated >= threshold, 1, 0)
+
+# Generate the confusion matrix for the updated model
+conf_matrix_updated <- confusionMatrix(as.factor(pred_classes_updated), as.factor(y), positive = "1")
+print(conf_matrix_updated)
+```
+
+We also need to draw the Receiver Operating Characteristic Curve.
+
+```{r}
+# Predict probabilities for the entire dataset
+pred_probs_updated <- predict(final_model_updated, type = "response")
+
+# Compute ROC curve
+roc_curve <- roc(data_final$Status, pred_probs_updated)
+
+# Plot ROC curve
+plot(roc_curve, col = "blue", lwd = 2, main = "ROC Curve for Updated Model")
+abline(a = 0, b = 1, lty = 2, col = "gray")  # Add diagonal line (random guess)
+
+# Add AUC value to the plot
+auc_value <- auc(roc_curve)
+text(0.6, 0.2, paste("AUC =", round(auc_value, 3)), col = "red", cex = 1.2)
 
 ```
 
+On the entire dataset, ROC-AUC value is 0.753, indicating the model performance is acceptable but has room for improvement (0.7 - 0.8).
 
+```{r}
+# Create calibration data frame
+calibration_df <- data.frame(
+  Predicted = pred_probs_updated,
+  Observed = as.numeric(data_final$Status)
+)
 
+# Group predicted probabilities into bins
+calibration_df$Bin <- cut(calibration_df$Predicted, breaks = seq(0, 1, by = 0.1), include.lowest = TRUE)
 
+# Calculate mean predicted probability and observed proportion for each bin
+calibration_summary <- calibration_df %>%
+  group_by(Bin) %>%
+  summarise(
+    Mean_Predicted = mean(Predicted),
+    Mean_Observed = mean(Observed)
+  )
 
+# Plot calibration curve
+ggplot(calibration_summary, aes(x = Mean_Predicted, y = Mean_Observed)) +
+  geom_point(color = "blue", size = 3) +
+  geom_line(color = "blue", lwd = 1) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(title = "Calibration Curve for Updated Model",
+       x = "Mean Predicted Probability",
+       y = "Observed Proportion") +
+  theme_minimal()
 
+```
 
+The calibration curve demonstrates that the predicted probabilities align reasonably well with the observed proportions across most bins, as the points and blue line generally follow the diagonal red dashed line (perfect calibration) although some deviations exist. Overall, the model shows acceptable calibration.
 
+Cross-validation provides a comprehensive method for model diagnosis by evaluating its performance across multiple data splits. This approach helps assess the model's generalization ability, reducing the risk of overfitting and ensuring robust performance on unseen data.
 
+```{r}
+# Define 10-fold cross-validation
+set.seed(123)  # For reproducibility
+folds <- createFolds(y, k = 10, list = TRUE)
 
+# Initialize a data frame to store results
+cv_results <- data.frame(
+  Fold = integer(),
+  Accuracy = numeric(),
+  Sensitivity = numeric(),
+  Specificity = numeric(),
+  ROC_AUC = numeric()
+)
 
+# Perform 10-fold cross-validation
+for (i in seq_along(folds)) {
+  # Split data into training and testing sets
+  train_indices <- unlist(folds[-i])  # Indices for training data
+  test_indices <- unlist(folds[i])   # Indices for testing data
+  
+  train_data <- data_final[train_indices, ]
+  test_data <- data_final[test_indices, ]
+  
+  # Refit the logistic regression model on the training set
+  train_model <- glm(updated_formula, data = train_data, family = "binomial")
+  
+  # Predict probabilities on the testing set
+  test_probs <- predict(train_model, newdata = test_data, type = "response")
+  
+  # Convert probabilities to binary predictions
+  test_preds <- ifelse(test_probs >= threshold, 1, 0)
+  
+  # Generate the confusion matrix for the testing set
+  fold_conf_matrix <- confusionMatrix(
+    as.factor(test_preds),
+    as.factor(test_data$Status),
+    positive = "1"
+  )
+  
+  # Calculate ROC-AUC
+  roc_curve <- roc(as.numeric(test_data$Status), test_probs)
+  roc_auc <- auc(roc_curve)
+  
+  # Store performance metrics for this fold
+  cv_results <- rbind(cv_results, data.frame(
+    Fold = i,
+    Accuracy = fold_conf_matrix$overall["Accuracy"],
+    Sensitivity = fold_conf_matrix$byClass["Sensitivity"],
+    Specificity = fold_conf_matrix$byClass["Specificity"],
+    ROC_AUC = as.numeric(roc_auc)
+  ))
+}
 
+# Summarize cross-validation results
+cv_summary <- data.frame(
+  Metric = c("Accuracy", "Sensitivity", "Specificity", "ROC_AUC"),
+  Mean = colMeans(cv_results[, -1], na.rm = TRUE),
+  SD = apply(cv_results[, -1], 2, sd, na.rm = TRUE)
+)
 
+# Print the summary of cross-validation results
+print("Cross-Validation Results:")
+print(cv_summary)
+```
 
+The average accuracy is 85.29% (SD = 1.04%), indicating that the model performs well overall in classifying the observations correctly. The specificity is very high, averaging 98.36% (SD = 0.64%), which demonstrates the model's strong ability to correctly identify negative cases (Alive). However, the sensitivity is relatively low at 13.00% (SD = 3.01%), reflecting a limited capability to detect positive cases (Alive). The ROC-AUC is 0.744 (SD = 0.024), suggesting the model has acceptable discrimination ability but room for improvement.
 
+```{r}
+# Calculate Cook's Distance
+cooks_d <- cooks.distance(final_model_updated)
+
+# Plot Cook's Distance
+plot(cooks_d, type = "h", main = "Cook's Distance", ylab = "Cook's Distance")
+abline(h = 4/(nrow(data_final) - length(final_model_updated$coefficients) - 1), col = "red", lty = 2)
+
+# Identify influential points
+influential_threshold <- 4/(nrow(data_final) - length(final_model_updated$coefficients) - 1)
+influential_points <- which(cooks_d > influential_threshold)
+print(paste("Number of influential points:", length(influential_points)))
+
+# Inspect influential observations
+influential_data <- data_final[influential_points, ]
+kable(head(influential_data, 10), caption = "Influential Observations")
+
+```
 
