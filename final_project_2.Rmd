@@ -498,5 +498,17 @@ abline(h = 4/(nrow(data_final) - length(final_model_updated$coefficients) - 1), 
 
 
 ```
+
 The red dashed line represents the commonly used threshold for identifying influential points. The majority of observations fall below the threshold, suggesting that they contribute reasonably and do not overly influence the model.
+
+```{r}
+# Identify influential points
+influential_threshold <- 4/(nrow(data_final) - length(final_model_updated$coefficients) - 1)
+influential_points <- which(cooks_d > influential_threshold)
+print(paste("Number of influential points:", length(influential_points)))
+
+# Inspect influential observations
+influential_data <- data_final[influential_points, ]
+kable(head(influential_data, 10), caption = "Influential Observations")
+```
 
