@@ -503,4 +503,5 @@ influential_data <- data_final[influential_points, ]
 kable(head(influential_data, 10), caption = "Influential Observations")
 
 ```
+The red dashed line represents the commonly used threshold for identifying influential points. The majority of observations fall below the threshold, suggesting that they contribute reasonably and do not overly influence the model.
 
