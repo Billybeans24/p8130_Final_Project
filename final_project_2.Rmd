@@ -279,8 +279,8 @@ The variable "X6th" is excluded from the model because one of its levels, X6th.S
 
 ```{r}
 # Remove X6th-related variables from selected_vars
-X6th_related <- c("X6th.StageIIB", "X6th.StageIIIB", "X6th.StageIIIC")
-selected_vars_updated <- setdiff(selected_vars, X6th_related)
+X6th_N3 <- c("N.StageN3", "X6th.StageIIIC")
+selected_vars_updated <- setdiff(selected_vars, X6th_N3)
 
 # Output the updated selected variables
 print("Updated selected variables:")
