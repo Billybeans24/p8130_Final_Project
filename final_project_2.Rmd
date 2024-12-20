@@ -254,182 +254,252 @@ final_model <- glm(final_formula, data = data_final, family = "binomial")
 summary(final_model)
 
 ```
-
 ```{r}
-############################################################
-# Model Diagnostics (No Interaction Yet)
-############################################################
-final_model <- glm(final_formula, data = data_final, family = "binomial", x=TRUE, y=TRUE)
+# Identify aliased (linearly dependent) coefficients
+alias_info <- alias(final_model)
+print(alias_info)
 
-# 1. VIF
-vif_values <- vif(final_model)
-cat("VIF Values:\n")
-print(vif_values)
-
-# Get predictions
-pred_prob <- predict(final_model, type = "response")
-
-# Check lengths
-if(length(pred_prob) != length(data_final$Status)){
-  stop("pred_prob and Status differ in length!")
+# Extract the names of aliased coefficients, if any
+if (!is.null(alias_info$Complete)) {
+  aliased_vars <- rownames(alias_info$Complete)
+  print("Aliased (linearly dependent) variables:")
+  print(aliased_vars)
+} else {
+  print("No aliased coefficients found.")
 }
-
-# Check for NAs
-if(any(is.na(data_final$Status)) || any(is.na(pred_prob))){
-  stop("NAs found in Status or pred_prob!")
-}
-
-# 2. Hosmer-Lemeshow Test
-hl_test <- tryCatch({
-  hoslem.test(data_final$Status, pred_prob, g=5)
-})
-cat("Hosmer-Lemeshow Test:\n")
-print(hl_test)
-
-# 3. Influential Observations
-influence_measures_res <- influence.measures(final_model)
-summary(influence_measures_res)
-
-# 4. Linearity Check (e.g., Log_Tumor_Size)
-if("Log_Tumor_Size" %in% selected_vars) {
-  crPlots(final_model, terms = "Log_Tumor_Size")
-}
-
-# 5. ROC and AUC
-roc_obj <- roc(data_final$Status, pred_prob)
-auc_value <- auc(roc_obj)
-cat("Overall AUC:", auc_value, "\n")
-plot(roc_obj, main=paste("ROC Curve, AUC =", round(auc_value,3)))
-
 
 ```
 
+
 ```{r}
-# Histogram of predicted probabilities
-ggplot(data_final, aes(x = pred_prob)) +
-  geom_histogram(binwidth = 0.05, fill = "steelblue", color = "black") +
-  labs(title = "Distribution of Predicted Probabilities", x = "Predicted Probability", y = "Frequency") +
+# Check if there are aliased coefficients
+if (!is.null(alias_info$Complete)) {
+  # Extract the names of aliased variables
+  aliased_vars <- rownames(alias_info$Complete)
+  
+  # Print aliased variables
+  print("Aliased (linearly dependent) variables:")
+  print(aliased_vars)
+  
+  # Strategy: Remove the last variable in each aliased set
+  # This can be adjusted based on domain knowledge or other criteria
+  vars_to_remove <- sapply(strsplit(aliased_vars, ":"), tail, n = 1)
+  
+  print("Variables to remove to resolve aliasing:")
+  print(vars_to_remove)
+  
+  # Update the selected_vars by removing the problematic variables
+  selected_vars_updated <- setdiff(selected_vars, vars_to_remove)
+  
+  print("Updated list of selected variables after removing aliased variables:")
+  print(selected_vars_updated)
+  
+  # Reconstruct the final formula without the aliased variables
+  final_formula_updated <- as.formula(paste("Status ~", paste(selected_vars_updated, collapse = " + ")))
+  
+  # Refit the logistic regression model without aliased variables
+  final_model_updated <- glm(final_formula_updated, data = data_final, family = "binomial")
+  
+  
+} else {
+  print("No aliased coefficients to address. Proceeding to calculate VIF.")
+  final_model_updated <- final_model  # No changes needed
+}
+
+```
+```{r}
+# Calculate Variance Inflation Factor (VIF) for the updated model
+vif_values_updated <- vif(final_model_updated)
+print("Variance Inflation Factors (VIF) for the updated model:")
+print(vif_values_updated)
+
+# Optionally, visualize VIF values
+library(ggplot2)
+
+# Create a data frame for plotting
+vif_df <- data.frame(
+  Variable = names(vif_values_updated),
+  VIF = vif_values_updated
+)
+
+# Plot VIF values
+ggplot(vif_df, aes(x = reorder(Variable, VIF), y = VIF)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  geom_hline(yintercept = 5, color = "red", linetype = "dashed") +
+  labs(title = "Variance Inflation Factors (VIF)",
+       x = "Predictor Variables",
+       y = "VIF") +
+  coord_flip() +
+  theme_minimal()
+
+
+```
+```{r}
+
+threshold <- 0.5 
+# Predict probabilities using the updated model
+pred_probs_updated <- predict(final_model_updated, type = "response")
+
+# Set the same classification threshold
+pred_classes_updated <- ifelse(pred_probs_updated >= threshold, 1, 0)
+
+# Generate the confusion matrix for the updated model
+conf_matrix_updated <- confusionMatrix(as.factor(pred_classes_updated), as.factor(y), positive = "1")
+print(conf_matrix_updated)
+
+```
+```{r}
+# Install and load necessary package
+if(!require(pROC)) install.packages("pROC")
+library(pROC)
+
+# Compute ROC curve
+roc_obj <- roc(y, pred_probs_updated)
+
+# Plot ROC curve
+plot(roc_obj, col = "blue", main = "ROC Curve for Final Logistic Regression Model")
+abline(a = 0, b = 1, lty = 2, col = "red")  # Diagonal line for reference
+
+# Calculate and print AUC
+auc_value <- auc(roc_obj)
+print(paste("AUC:", round(auc_value, 3)))
+
+```
+```{r}
+# Install and load necessary package
+if(!require(ggplot2)) install.packages("ggplot2")
+library(ggplot2)
+
+# Create calibration data by binning predicted probabilities
+calibration_data <- data.frame(
+  predicted = pred_probs_updated,
+  actual = y
+)
+
+# Plot calibration
+ggplot(calibration_data, aes(x = predicted, y = actual)) +
+  stat_summary_bin(fun = mean, bins = 10, geom = "line", color = "blue") +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  labs(title = "Calibration Plot", x = "Predicted Probability", y = "Observed Proportion") +
   theme_minimal()
 
 ```
 
 ```{r}
-# Check if both variables are selected
-if(all(c("RaceBlack", "Log_Tumor_Size") %in% selected_vars)) {
-  
-  # Update formula to include interaction
-  final_formula_inter <- update(final_formula, . ~ . + RaceBlack:Log_Tumor_Size)
-  
-  # Fit the Interaction Model
-  final_model_inter <- glm(final_formula_inter, data = data_final, family = "binomial")
-  
-  # Check for Aliasing
-  alias_results_inter <- alias(final_model_inter)
-  print(alias_results_inter)
-  
-  # If Aliasing Exists, Remove Problematic Terms
-  problem_vars_inter <- rownames(alias_results_inter$Complete)[rowSums(alias_results_inter$Complete) > 0]
-  if(length(problem_vars_inter) > 0) {
-    selected_vars <- setdiff(selected_vars, problem_vars_inter)
-    final_formula_inter <- as.formula(paste("Status ~", paste(selected_vars, collapse = " + "), "+ RaceBlack:Log_Tumor_Size"))
-    final_model_inter <- glm(final_formula_inter, data = data_final, family = "binomial")
-  }
-  
-  # Summary of Interaction Model
-  summary(final_model_inter)
-  
-  # Re-run Diagnostics for Interaction Model
-  
-  # VIF
-  vif_values_inter <- vif(final_model_inter)
-  kable(as.data.frame(vif_values_inter), 
-        col.names = c("VIF"), 
-        caption = "VIF Values for Interaction Model Predictors")
-  
-  # Predictions
-  pred_prob_inter <- predict(final_model_inter, type = "response")
-  
-  # Hosmer-Lemeshow Test for Interaction Model
-  hl_test_inter <- tryCatch({
-    ResourceSelection::hoslem.test(data_final$Status, pred_prob_inter, g = 5)
-  }, error = function(e) {
-    message("Hosmer-Lemeshow test failed with g=5 for interaction model. Trying g=3...")
-    ResourceSelection::hoslem.test(data_final$Status, pred_prob_inter, g = 3)
-  })
-  
-  cat("Hosmer-Lemeshow Test (Interaction Model):\n")
-  print(hl_test_inter)
-  
-  # Manual Hosmer-Lemeshow Test for Interaction Model
-  if(inherits(hl_test_inter, "try-error")) {
-    cat("Implementing Manual Hosmer-Lemeshow Test for Interaction Model...\n")
-    
-    # Create Deciles
-    data_final <- data_final %>%
-      mutate(decile_inter = ntile(pred_prob_inter, 10))
-    
-    # Calculate Observed and Expected Counts per Decile
-    hl_manual_inter <- data_final %>%
-      group_by(decile_inter) %>%
-      summarise(
-        observed = sum(Status),
-        expected = sum(pred_prob_inter),
-        n = n()
-      ) %>%
-      mutate(
-        variance = expected * (1 - mean(pred_prob_inter)),
-        chi_square = (observed - expected)^2 / variance
-      )
-    
-    # Total Chi-Square Statistic
-    chi_square_total_inter <- sum(hl_manual_inter$chi_square)
-    degrees_freedom_inter <- 10 - 2  # g - number of parameters
-    
-    # P-Value
-    p_value_hl_manual_inter <- 1 - pchisq(chi_square_total_inter, df = degrees_freedom_inter)
-    
-    # Display Results
-    kable(hl_manual_inter, 
-          col.names = c("Decile", "Observed", "Expected", "n", "Variance", "Chi-Square"),
-          caption = "Manual Hosmer-Lemeshow Test Table for Interaction Model")
-    
-    cat("Manual Hosmer-Lemeshow Test (Interaction Model):\n")
-    cat("Chi-Square:", round(chi_square_total_inter, 2), 
-        "Degrees of Freedom:", degrees_freedom_inter, 
-        "P-Value:", round(p_value_hl_manual_inter, 4), "\n")
-  }
-  
-  # Influential Observations for Interaction Model
-  influence_measures_res_inter <- influence.measures(final_model_inter)
-  summary(influence_measures_res_inter)
-  
-  # Linearity Check
-  if("Log_Tumor_Size" %in% selected_vars) {
-    crPlots(final_model_inter, terms = "Log_Tumor_Size")
-  }
-  
-  # ROC and AUC for Interaction Model
-  roc_obj_inter <- roc(data_final$Status, pred_prob_inter)
-  auc_value_inter <- auc(roc_obj_inter)
-  cat("Overall AUC (Interaction Model):", auc_value_inter, "\n")
-  
-  # Plot ROC Curve
-  plot(roc_obj_inter, main = paste("ROC Curve (Interaction Model), AUC =", round(auc_value_inter, 3)))
-  
-  # Compare AICs
-  cat("AIC without Interaction:", AIC(final_model), "\n")
-  cat("AIC with Interaction:", AIC(final_model_inter), "\n")
-  
-  # Likelihood Ratio Test
-  anova(final_model, final_model_inter, test = "Chisq")
-  
-  # Update model_to_interpret for Interpretation
-  model_to_interpret <- final_model_inter
-} else {
-  model_to_interpret <- final_model
+# Ensure 'Race' is included in data_final
+if(!"Race" %in% colnames(data_final)){
+  data_final$Race <- data$Race
 }
 
+# Define race groups: "White" and "Black_Other"
+data_final <- data_final %>%
+  mutate(Race_Group = ifelse(Race == "White", "White", "Black_Other"))
+
+# Function to compute performance metrics
+compute_metrics <- function(actual, predicted, probs, group_name) {
+  cm <- confusionMatrix(as.factor(predicted), as.factor(actual), positive = "1")
+  roc_obj <- roc(actual, probs)
+  auc_val <- auc(roc_obj)
+  
+  return(data.frame(
+    Group = group_name,
+    Accuracy = round(cm$overall['Accuracy'], 3),
+    Precision = round(cm$byClass['Precision'], 3),
+    Recall = round(cm$byClass['Recall'], 3),
+    F1 = round(cm$byClass['F1'], 3),
+    AUC = round(auc_val, 3)
+  ))
+}
+
+# Initialize list to store metrics
+metrics_list <- list()
+
+# Iterate over each race group
+for(group in unique(data_final$Race_Group)) {
+  idx <- which(data_final$Race_Group == group)
+  actual_group <- y[idx]
+  probs_group <- pred_probs_updated[idx]
+  predicted_group <- pred_classes_updated[idx]
+  
+  metrics <- compute_metrics(actual_group, predicted_group, probs_group, group)
+  metrics_list[[group]] <- metrics
+}
+
+# Combine metrics into a single data frame
+metrics_df <- bind_rows(metrics_list)
+print(metrics_df)
+
+
 ```
+```{r}
+# Compute ROC curves for each group
+roc_white <- roc(y[data_final$Race_Group == "White"], pred_probs_updated[data_final$Race_Group == "White"])
+roc_black_other <- roc(y[data_final$Race_Group == "Black_Other"], pred_probs_updated[data_final$Race_Group == "Black_Other"])
+
+# Perform DeLong's test to compare AUCs
+delong_test <- roc.test(roc_white, roc_black_other, method = "delong")
+print(delong_test)
+
+```
+
+
+```{r}
+# Calculate Cook's Distance
+cooks_d <- cooks.distance(final_model_updated)
+
+# Plot Cook's Distance
+plot(cooks_d, type = "h", main = "Cook's Distance", ylab = "Cook's Distance")
+abline(h = 4/(nrow(data_final) - length(final_model_updated$coefficients) - 1), col = "red", lty = 2)
+
+# Identify influential points
+influential_threshold <- 4/(nrow(data_final) - length(final_model_updated$coefficients) - 1)
+influential_points <- which(cooks_d > influential_threshold)
+print(paste("Number of influential points:", length(influential_points)))
+
+# Inspect influential observations
+influential_data <- data_final[influential_points, ]
+kable(head(influential_data, 10), caption = "Influential Observations")
+
+```
+```{r}
+# Extract coefficients from the updated final model
+coefficients_updated <- summary(final_model_updated)$coefficients
+
+# Create a summary table
+summary_table_updated <- data.frame(
+  Variable = rownames(coefficients_updated),
+  Estimate = coefficients_updated[, "Estimate"],
+  Std_Error = coefficients_updated[, "Std. Error"],
+  z_value = coefficients_updated[, "z value"],
+  p_value = coefficients_updated[, "Pr(>|z|)"]
+)
+
+# Calculate Odds Ratios and Confidence Intervals
+summary_table_updated <- summary_table_updated %>%
+  mutate(
+    Odds_Ratio = exp(Estimate),
+    CI_Lower = exp(Estimate - 1.96 * Std_Error),
+    CI_Upper = exp(Estimate + 1.96 * Std_Error)
+  ) %>%
+  select(Variable, Estimate, Odds_Ratio, CI_Lower, CI_Upper, p_value)
+
+# Display the summary table
+kable(summary_table_updated, digits = 3, caption = "Final Logistic Regression Model Summary")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
